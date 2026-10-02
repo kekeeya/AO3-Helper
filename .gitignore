@@ -1,0 +1,6 @@
+# 只发布正式版本相关文件：默认忽略所有内容，再显式放行要上传的那几个
+*
+!.gitignore
+!README.md
+!LICENSE
+!AO3-helper-generator.html
