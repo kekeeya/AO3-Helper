@@ -24,7 +24,7 @@
 
 ## 使用方法
 
-1. 打开 `AO3-helper-generator.html`，自定义规则，点「生成脚本」生成JS；如果没有隐藏已读 / 已收藏记录的需求，也可以直接下载 `AO3-helper-basic.js` 使用。
+1. clone到本地打开 `AO3-helper-generator.html`，或者直接访问部署好的网页 [kekeeya.github.io/AO3-Helper](https://kekeeya.github.io/AO3-Helper/)，自定义规则，点「生成脚本」生成JS；如果没有隐藏已读 / 已收藏记录的需求，也可以直接下载 `AO3-helper-basic.js` 使用。
 2. 按照对应平台的流程，在对应浏览器生效第一步生成的脚本。
 
 装好后AO3页面顶部会出现一条黄色设置条，展开 ▸ 更多设置 后自行配置。
