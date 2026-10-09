@@ -293,6 +293,12 @@
       kwInput.value = rule.keyword;
       kwInput.placeholder = '例如：角色名/配对/其他';
       kwInput.addEventListener('input', () => {
+        const newText = kwInput.value.trim().toLowerCase();
+        if (newText && rules.some((r, i) => i !== idx && r.keyword.trim().toLowerCase() === newText)) {
+          alert('和已有规则重复！');
+          kwInput.value = rules[idx].keyword; // 回退到上一个有效值，不保存这次改动
+          return;
+        }
         rules[idx].keyword = kwInput.value;
         saveRules();
       });
@@ -541,17 +547,31 @@
     await GM.setValue('ao3Helper_manualBlockedIds', manualBlockedList);
   }
 
+  // 跟removeManualBlock的区别：这个还要把页面上已经隐藏的work恢复显示，用于用户主动撤销
+  async function undoManualWorkBlock(workId) {
+    await removeManualBlock(workId);
+    const placeholder = document.querySelector('.ao3-helper-manual-blocked-placeholder[data-workid="' + workId + '"]');
+    if (placeholder) placeholder.remove();
+    const workEl = Array.from(getAllWorkEls()).find((el) => getWorkId(el) === workId);
+    if (workEl) {
+      workEl.style.display = '';
+      delete workEl.dataset.ao3HelperPlaceholderAdded;
+      delete workEl.dataset.ao3HelperHardHidden;
+      delete workEl.dataset.ao3HelperChecked;
+    }
+  }
+
   // 运行时可读写的屏蔽规则（点"[屏蔽此tag]"/"添加屏蔽词"都存这里），跟FILTER_RULES同一套匹配逻辑
   let manualBlockedTagRules = []; // [{keyword, scopes:{tag,title,summary}, mode:'exact'|'fuzzy'}]
 
-  // 判断两条规则是不是"完全一样"（关键词忽略首尾空格+大小写，范围和模式都得一致）
+  // 判断两条规则是不是"完全一样"（关键词忽略首尾空格+大小写，范围和模式都得一致），用于按具体规则删除
   function ruleKey(r) {
     return r.keyword.trim().toLowerCase() + '|' + r.mode + '|' + (r.scopes.tag ? 1 : 0) + (r.scopes.title ? 1 : 0) + (r.scopes.summary ? 1 : 0);
   }
 
-  // 按完整规则形状比对，不能只比关键词文字，否则会跟同名但范围/模式不同的规则混淆
-  function tagBlockRuleKeyFor(tagName) {
-    return ruleKey({ keyword: tagName, scopes: { tag: true, title: false, summary: false }, mode: 'exact' });
+  // 只比关键词文字（忽略首尾空格+大小写），同一个关键词不管范围/模式只允许存在一条规则
+  function keywordTextKey(keyword) {
+    return keyword.trim().toLowerCase();
   }
 
   function applyNewRuleToVisibleWorks(rule) {
@@ -566,29 +586,24 @@
     });
   }
 
-  async function addManualTagRule(tagName) {
-    const targetKey = tagBlockRuleKeyFor(tagName);
-    if (manualBlockedTagRules.some((r) => ruleKey(r) === targetKey)) return;
-    const newRule = { keyword: tagName, scopes: { tag: true, title: false, summary: false }, mode: 'exact' };
-    manualBlockedTagRules.push(newRule);
-    await GM.setValue('ao3Helper_manualBlockedTagRules', manualBlockedTagRules);
-    applyNewRuleToVisibleWorks(newRule);
-  }
-
-  // 横幅"添加屏蔽词"弹窗提交时调用：跟脚本里已经写死的规则、或者缓存里已经加过的
-  // 规则完全重复（关键词+范围+模式都一样）就不重复添加，返回状态给弹窗显示提示
+  // 横幅"添加屏蔽词"弹窗提交、"[屏蔽此tag]"都走这里：关键词文字重复（不管范围/模式）就拒绝
   async function addManualKeywordRule(rule) {
-    const newKey = ruleKey(rule);
-    if (FILTER_RULES.some((r) => ruleKey(r) === newKey)) return 'already-static';
-    if (manualBlockedTagRules.some((r) => ruleKey(r) === newKey)) return 'already-added';
+    const newTextKey = keywordTextKey(rule.keyword);
+    const isDuplicate = FILTER_RULES.some((r) => keywordTextKey(r.keyword) === newTextKey)
+      || manualBlockedTagRules.some((r) => keywordTextKey(r.keyword) === newTextKey);
+    if (isDuplicate) return 'duplicate';
     manualBlockedTagRules.push(rule);
     await GM.setValue('ao3Helper_manualBlockedTagRules', manualBlockedTagRules);
     applyNewRuleToVisibleWorks(rule);
     return 'added';
   }
 
-  async function removeManualTagRule(tagName) {
-    const targetKey = tagBlockRuleKeyFor(tagName);
+  async function addManualTagRule(tagName) {
+    return await addManualKeywordRule({ keyword: tagName, scopes: { tag: true, title: false, summary: false }, mode: 'exact' });
+  }
+
+  // 按规则key删除一条手动关键词规则：[屏蔽此tag]的撤销、屏蔽配置弹窗里的删除都走这里
+  async function removeManualRuleByKey(targetKey) {
     manualBlockedTagRules = manualBlockedTagRules.filter((r) => ruleKey(r) !== targetKey);
     await GM.setValue('ao3Helper_manualBlockedTagRules', manualBlockedTagRules);
     // 重新检查已隐藏的作品，没有规则命中了就恢复显示
@@ -605,6 +620,13 @@
       delete workEl.dataset.ao3HelperHardHidden;
       delete workEl.dataset.ao3HelperChecked; // 让它有机会重新走一遍正常判断（含重新长出[屏蔽]链接）
     });
+  }
+
+  async function removeManualTagRule(tagName) {
+    const targetTextKey = keywordTextKey(tagName);
+    const match = manualBlockedTagRules.find((r) => keywordTextKey(r.keyword) === targetTextKey);
+    if (!match) return;
+    await removeManualRuleByKey(ruleKey(match));
   }
 
   function extractTagNameFromHeading(heading) {
@@ -627,7 +649,7 @@
     wrap.className = 'ao3-helper-tagblock-wrap';
     wrap.style.cssText = 'margin-left:8px;font-size:13px;';
 
-    if (manualBlockedTagRules.some((r) => ruleKey(r) === tagBlockRuleKeyFor(tagName))) {
+    if (manualBlockedTagRules.some((r) => keywordTextKey(r.keyword) === keywordTextKey(tagName))) {
       wrap.appendChild(document.createTextNode('（已屏蔽此tag）'));
       const undo = document.createElement('span');
       undo.className = 'ao3-helper-tagblock-undo-link';
@@ -653,8 +675,8 @@
     heading.dataset.ao3HelperTagControlAdded = '1';
     const tagName = extractTagNameFromHeading(heading);
     if (!tagName) return;
-    if (FILTER_RULES.some((r) => r.mode === 'exact' && r.scopes.tag && r.keyword === tagName)) {
-      return; // 已经在脚本里永久屏蔽了（网页配置器里配置过），不需要任何交互提示
+    if (FILTER_RULES.some((r) => keywordTextKey(r.keyword) === keywordTextKey(tagName))) {
+      return; // 已经在脚本里永久屏蔽了（网页配置器里配置过，不管范围/模式），不需要任何交互提示
     }
     renderTagBlockControl(heading, tagName);
   }
@@ -769,12 +791,150 @@
         return;
       }
       const result = await addManualKeywordRule({ keyword: keyword, scopes: scopes, mode: mode });
-      if (result === 'already-static' || result === 'already-added') {
-        errorMsg.textContent = '这条规则已经添加过了，不用重复添加';
+      if (result === 'duplicate') {
+        errorMsg.textContent = '和已有规则重复！';
         return;
       }
       close();
       refreshUI();
+    });
+  }
+
+  function scopesLabel(scopes) {
+    const parts = [];
+    if (scopes.tag) parts.push('Tag');
+    if (scopes.title) parts.push('标题');
+    if (scopes.summary) parts.push('简介');
+    return parts.join('+') || '-';
+  }
+
+  // 脚本写死的规则删不掉（装好的脚本文件没法自己改自己），只给缓存来源的条目加删除按钮
+  function showBlockConfigDialog() {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:999998;display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:#fff;color:#1d1d1f;padding:20px;border-radius:8px;width:560px;max-width:92vw;max-height:80vh;overflow:auto;font-size:14px;box-shadow:0 4px 20px rgba(0,0,0,0.25);';
+
+    const title = document.createElement('div');
+    title.textContent = '当前屏蔽设置';
+    title.style.cssText = 'font-weight:600;font-size:16px;margin-bottom:6px;';
+    modal.appendChild(title);
+
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:12px;color:#6e6e73;margin-bottom:14px;line-height:1.4;';
+    hint.textContent = '"脚本内置"是生成脚本时写死的规则，这里删不掉，要删请回配置生成器重新生成；"本机缓存"是在AO3页面上点"添加屏蔽词"/"[屏蔽此tag]"/"[屏蔽此work]"加的，可以直接在这里删除。';
+    modal.appendChild(hint);
+
+    function buildTable(headers, rows) {
+      const table = document.createElement('table');
+      table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;margin-bottom:6px;';
+      const thead = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      headers.forEach((h) => {
+        const th = document.createElement('th');
+        th.textContent = h;
+        th.style.cssText = 'text-align:left;border-bottom:1px solid #ddd;padding:4px 6px;color:#6e6e73;';
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      if (rows.length === 0) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = headers.length;
+        td.textContent = '（空）';
+        td.style.cssText = 'padding:8px 6px;color:#999;';
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      }
+      rows.forEach((cells) => {
+        const tr = document.createElement('tr');
+        cells.forEach((cell) => {
+          const td = document.createElement('td');
+          td.style.cssText = 'padding:4px 6px;border-bottom:1px solid #f0f0f0;word-break:break-all;';
+          if (cell instanceof Node) td.appendChild(cell);
+          else td.textContent = cell;
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      return table;
+    }
+
+    function buildDeleteBtn(onClick) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = '删除';
+      btn.style.cssText = 'font-size:12px;padding:2px 10px;cursor:pointer;border:1px solid #f5c2c7;border-radius:4px;background:#f8d7da;color:#842029;';
+      btn.addEventListener('click', onClick);
+      return btn;
+    }
+
+    const kwTitle = document.createElement('div');
+    kwTitle.textContent = '关键词屏蔽';
+    kwTitle.style.cssText = 'font-size:14px;font-weight:600;margin:10px 0 6px;';
+    modal.appendChild(kwTitle);
+
+    const kwRows = FILTER_RULES.map((r) => [r.keyword, scopesLabel(r.scopes), r.mode === 'exact' ? '精准' : '模糊', '脚本内置', ''])
+      .concat(manualBlockedTagRules.map((r) => {
+        const delBtn = buildDeleteBtn(async function () {
+          await removeManualRuleByKey(ruleKey(r));
+          const heading = document.querySelector('h2.heading');
+          if (heading) {
+            const tagName = extractTagNameFromHeading(heading);
+            if (tagName) renderTagBlockControl(heading, tagName);
+          }
+          refreshUI();
+          close();
+          showBlockConfigDialog();
+        });
+        return [r.keyword, scopesLabel(r.scopes), r.mode === 'exact' ? '精准' : '模糊', '本机缓存', delBtn];
+      }));
+    modal.appendChild(buildTable(['关键词', '扫描范围', '匹配模式', '来源', ''], kwRows));
+
+    const idTitle = document.createElement('div');
+    idTitle.textContent = 'Work ID 屏蔽';
+    idTitle.style.cssText = 'font-size:14px;font-weight:600;margin:14px 0 6px;';
+    modal.appendChild(idTitle);
+
+    const idRows = BLOCKED_WORK_IDS.map((id) => [id, '', '脚本内置', ''])
+      .concat(manualBlockedList.map((entry) => {
+        const delBtn = buildDeleteBtn(async function () {
+          await undoManualWorkBlock(entry.id);
+          refreshUI();
+          close();
+          showBlockConfigDialog();
+        });
+        return [entry.id, entry.note || '', '本机缓存', delBtn];
+      }));
+    modal.appendChild(buildTable(['Work ID', '备注', '来源', ''], idRows));
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;justify-content:flex-end;margin-top:14px;';
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = '关闭';
+    closeBtn.style.cssText = 'font-size:13px;padding:6px 14px;cursor:pointer;border:1px solid #ddd;border-radius:6px;background:#fff;color:#1d1d1f;';
+    closeBtn.addEventListener('click', function () { close(); });
+    btnRow.appendChild(closeBtn);
+    modal.appendChild(btnRow);
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    function close() {
+      overlay.remove();
+      document.removeEventListener('keydown', onKeydown);
+    }
+    function onKeydown(e) {
+      if (e.key === 'Escape') close();
+    }
+    document.addEventListener('keydown', onKeydown);
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) close();
     });
   }
 
@@ -832,19 +992,7 @@
       e.preventDefault();
       const workId = undoLink.dataset.workid;
       if (!workId) return;
-      manualBlockedIdSet.delete(workId);
-      manualBlockedList = manualBlockedList.filter((entry) => entry.id !== workId);
-      await GM.setValue('ao3Helper_manualBlockedIds', manualBlockedList);
-      const placeholder = undoLink.closest('.ao3-helper-manual-blocked-placeholder');
-      if (placeholder) placeholder.remove();
-      // 按ID重新找回元素，清掉"已处理"标记让它重新走一遍判断
-      const workEl = Array.from(getAllWorkEls()).find((el) => getWorkId(el) === workId);
-      if (workEl) {
-        workEl.style.display = '';
-        delete workEl.dataset.ao3HelperPlaceholderAdded;
-        delete workEl.dataset.ao3HelperHardHidden;
-        delete workEl.dataset.ao3HelperChecked;
-      }
+      await undoManualWorkBlock(workId);
       refreshUI();
       return;
     }
@@ -853,7 +1001,8 @@
       e.preventDefault();
       const tagName = tagBlockLink.dataset.tagname;
       if (!tagName) return;
-      await addManualTagRule(tagName);
+      const result = await addManualTagRule(tagName);
+      if (result === 'duplicate') alert('和已有规则重复！');
       const heading = document.querySelector('h2.heading');
       if (heading) renderTagBlockControl(heading, tagName);
       refreshUI();
@@ -928,9 +1077,22 @@
     const bookmarksStable = await GM.getValue('ao3Helper_bookmarksIds', []);
     const bookmarksPending = await GM.getValue('ao3Helper_bookmarksPendingIds', []);
     bookmarkedIds = new Set(bookmarksStable.concat(bookmarksPending));
+    // 以js为准清掉缓存里的多余条目，不然删了也没用，还以为删除没生效
     manualBlockedList = await GM.getValue('ao3Helper_manualBlockedIds', []);
+    const dedupedBlockedList = manualBlockedList.filter((entry) => !BLOCKED_WORK_IDS.includes(entry.id));
+    if (dedupedBlockedList.length !== manualBlockedList.length) {
+      manualBlockedList = dedupedBlockedList;
+      await GM.setValue('ao3Helper_manualBlockedIds', manualBlockedList);
+    }
     rebuildManualBlockedIdSet();
+
     manualBlockedTagRules = await GM.getValue('ao3Helper_manualBlockedTagRules', []);
+    const staticRuleTextKeys = new Set(FILTER_RULES.map((r) => keywordTextKey(r.keyword)));
+    const dedupedTagRules = manualBlockedTagRules.filter((r) => !staticRuleTextKeys.has(keywordTextKey(r.keyword)));
+    if (dedupedTagRules.length !== manualBlockedTagRules.length) {
+      manualBlockedTagRules = dedupedTagRules;
+      await GM.setValue('ao3Helper_manualBlockedTagRules', manualBlockedTagRules);
+    }
     bannerExpanded = await GM.getValue('ao3Helper_bannerExpanded', false);
     bannerSticky = await GM.getValue('ao3Helper_bannerSticky', false);
   }
@@ -1439,14 +1601,26 @@
     });
     stickyLabel.appendChild(stickyCb);
     stickyLabel.appendChild(document.createTextNode(' 始终吸顶'));
-    toolsRow.appendChild(stickyLabel);
 
     const addKeywordBtn = document.createElement('button');
     addKeywordBtn.type = 'button';
     addKeywordBtn.textContent = '添加屏蔽词';
     addKeywordBtn.style.cssText = 'font-size:12px;padding:2px 8px;cursor:pointer;background:#f0f0f0;color:#444;border:1px solid #ccc;border-radius:4px;';
     addKeywordBtn.addEventListener('click', function () { showAddKeywordRuleDialog(); });
-    toolsRow.appendChild(addKeywordBtn);
+
+    const configBtn = document.createElement('button');
+    configBtn.type = 'button';
+    configBtn.textContent = '屏蔽设置';
+    configBtn.style.cssText = 'font-size:12px;padding:2px 8px;cursor:pointer;background:#f0f0f0;color:#444;border:1px solid #ccc;border-radius:4px;';
+    configBtn.addEventListener('click', function () { showBlockConfigDialog(); });
+
+    // 吸顶开关/添加屏蔽词/屏蔽配置包成一组，避免toolsRow换行时把它们拆散到两行
+    const stickyToolsGroup = document.createElement('div');
+    stickyToolsGroup.style.cssText = 'display:flex;gap:16px;align-items:center;';
+    stickyToolsGroup.appendChild(stickyLabel);
+    stickyToolsGroup.appendChild(addKeywordBtn);
+    stickyToolsGroup.appendChild(configBtn);
+    toolsRow.appendChild(stickyToolsGroup);
 
     const exportBtn = document.createElement('button');
     exportBtn.type = 'button';
